@@ -48,6 +48,21 @@ class BaseProfile:
     def tools(self) -> list[ToolDefinition]:
         return self.tool_registry.definitions()
 
+    def build_system_prompt(
+        self,
+        environment: dict[str, str] | None = None,
+        project_docs: list[str] | None = None,
+        user_instructions: str | None = None,
+    ) -> str:
+        """Default system prompt — subclasses override with provider-specific base instructions."""
+        return self._build_prompt_layers(
+            "You are a helpful coding assistant.",
+            environment, project_docs, user_instructions,
+        )
+
+    def provider_options(self) -> dict[str, Any] | None:
+        return None
+
     def _build_prompt_layers(
         self,
         base_instructions: str,
