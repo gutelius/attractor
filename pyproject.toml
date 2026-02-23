@@ -1,0 +1,16 @@
+[project]
+name = "attractor-workspace"
+version = "0.1.0"
+requires-python = ">=3.12"
+
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[tool.uv.sources]
+attractor-llm = { workspace = true }
+attractor-agent = { workspace = true }
+attractor = { workspace = true }
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
