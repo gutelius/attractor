@@ -1,0 +1,7 @@
+digraph SimplePipeline {
+    Start [shape=Mdiamond]
+    Plan [label="Plan the work"]
+    Implement [label="Write code"]
+    Exit [shape=Msquare]
+    Start -> Plan -> Implement -> Exit
+}

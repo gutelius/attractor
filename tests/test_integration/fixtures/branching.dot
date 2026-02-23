@@ -1,0 +1,16 @@
+digraph BranchingPipeline {
+    goal = "Complete the review process"
+
+    Start [shape=Mdiamond]
+    Plan [label="Create plan"]
+    Review [shape=diamond, label="Review plan"]
+    Good [label="Good path"]
+    Bad [label="Bad path"]
+    Exit [shape=Msquare]
+
+    Start -> Plan -> Review
+    Review -> Good [condition="outcome=success"]
+    Review -> Bad [condition="outcome=fail"]
+    Good -> Exit
+    Bad -> Exit
+}

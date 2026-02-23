@@ -1,0 +1,16 @@
+digraph HumanReview {
+    goal = "Get human approval"
+
+    Start [shape=Mdiamond]
+    Draft [label="Draft proposal"]
+    Review [shape=hexagon, label="Human review"]
+    Finalize [label="Finalize"]
+    Revise [label="Revise draft"]
+    Exit [shape=Msquare]
+
+    Start -> Draft -> Review
+    Review -> Finalize [label="approve", condition="outcome=success"]
+    Review -> Revise [label="revise", condition="outcome=fail"]
+    Finalize -> Exit
+    Revise -> Draft
+}
