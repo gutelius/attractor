@@ -1,0 +1,52 @@
+// ch05-human-review.dot
+// Replaces the conditional Review node with a human review gate.
+// The hexagon shape triggers the wait.human handler, which pauses
+// the pipeline and presents the outgoing edge labels as choices.
+
+digraph task_manager {
+    goal = "Build a task management API"
+
+    Start [shape=Mdiamond label="Start"]
+
+    Plan [
+        shape=box
+        label="Plan"
+        prompt="Create a detailed project plan for: $goal. List the endpoints, data models, and implementation steps."
+    ]
+
+    Implement [
+        shape=box
+        label="Implement"
+        prompt="Implement the plan from the previous step for: $goal. Write the Python code with FastAPI endpoints and Pydantic models."
+    ]
+
+    // Hexagon shape = wait.human handler.
+    // The pipeline pauses here and presents outgoing edge labels as options.
+    Review [shape=hexagon label="Review"]
+
+    Revise [
+        shape=box
+        label="Revise"
+        prompt="The reviewer rejected the implementation. Revise the code to address the feedback."
+    ]
+
+    Escalate [
+        shape=box
+        label="Escalate"
+        prompt="The reviewer escalated this item. Prepare a summary of the current state for a senior engineer."
+    ]
+
+    Exit [shape=Msquare label="Exit"]
+
+    Start -> Plan
+    Plan -> Implement
+    Implement -> Review
+
+    // Edge labels become selectable options in the human review prompt.
+    // Accelerator keys let the reviewer type a single character to choose.
+    Review -> Exit [label="[A] Approve"]
+    Review -> Revise [label="R) Reject"]
+    Review -> Escalate [label="E - Escalate"]
+    Revise -> Exit
+    Escalate -> Exit
+}

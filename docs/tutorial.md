@@ -282,3 +282,408 @@ uv run attractor run --dry-run --log-dir ./my-logs task-manager-v2.dot
 This writes all output to `./my-logs/` instead of the default location. Use this when you want to keep logs for different runs separate, or when you want to inspect the output in a specific directory.
 
 In dry-run mode, the log directory contains only a `checkpoint.json` file (no `prompt.md` or `response.md`, since no LLM calls are made). In a real run, you will find the full set of files described above for each work node.
+
+---
+
+## Chapter 4: Branching and Decisions
+
+This chapter adds conditional branching to the pipeline. Instead of a single path from start to finish, the engine chooses between edges based on the outcome of each node.
+
+### Add a Review node
+
+Until now, the pipeline has been a straight line: Start, Plan, Implement, Exit. Real workflows branch. After implementation, you want a review step that either passes the work through or sends it back for revision.
+
+Create a new file named `task-manager-v3.dot`:
+
+```dot
+digraph task_manager {
+    goal = "Build a task management API"
+
+    Start [shape=Mdiamond label="Start"]
+
+    Plan [
+        shape=box
+        label="Plan"
+        prompt="Create a detailed project plan for: $goal. List the endpoints, data models, and implementation steps."
+    ]
+
+    Implement [
+        shape=box
+        label="Implement"
+        prompt="Implement the plan from the previous step for: $goal. Write the Python code with FastAPI endpoints and Pydantic models."
+    ]
+
+    // Diamond shape = conditional node.
+    // The engine evaluates outgoing edge conditions against this node's outcome.
+    Review [shape=diamond label="Review"]
+
+    Revise [
+        shape=box
+        label="Revise"
+        prompt="The review found issues. Revise the implementation to address the feedback."
+    ]
+
+    Exit [shape=Msquare label="Exit"]
+
+    Start -> Plan
+    Plan -> Implement
+    Implement -> Review
+
+    // Conditional edges: the engine picks the edge whose condition matches.
+    Review -> Exit [condition="outcome=success" label="pass"]
+    Review -> Revise [condition="outcome=fail" label="fail"]
+    Revise -> Exit
+}
+```
+
+This file lives at [`docs/examples/ch04-branching.dot`](examples/ch04-branching.dot) in the repository.
+
+### The diamond shape
+
+The `diamond` shape tells Attractor to use the **conditional** handler. A conditional node evaluates its outgoing edges and picks the one whose condition matches the node's outcome. This is how you build if/else logic in a pipeline.
+
+Here is the updated shape table:
+
+| Shape | Meaning | Handler |
+|---|---|---|
+| `Mdiamond` | Pipeline entry point | start |
+| `Msquare` | Pipeline exit point | exit |
+| `box` | LLM task (default) | codergen |
+| `diamond` | Conditional branch | conditional |
+
+### Condition expressions
+
+Each outgoing edge from a conditional node can carry a `condition` attribute. The condition is a simple expression of the form `key=value`.
+
+```
+Review -> Exit [condition="outcome=success"]
+Review -> Revise [condition="outcome=fail"]
+```
+
+The key `outcome` is special. After the engine executes a node, it records whether the node succeeded or failed. The value is either `success` or `fail`. The condition `outcome=success` matches when the preceding node completed without errors.
+
+You can also use `!=` for negation (`outcome!=success`) and `&&` to combine clauses (`outcome=success && context.coverage>80`). For most pipelines, simple `outcome=success` and `outcome=fail` conditions cover what you need.
+
+### How the engine selects an edge
+
+When the engine finishes a node, it must decide which outgoing edge to follow. The selection algorithm works in priority order:
+
+1. **Condition match.** The engine evaluates every outgoing edge that has a `condition` attribute. If one or more conditions match, it picks the matching edge with the highest `weight` (ties broken alphabetically by target node ID).
+2. **Unconditional fallback.** If no condition matches, the engine looks for edges without a `condition` attribute. Among those, it picks the one with the highest `weight` (ties broken alphabetically).
+3. **Any edge.** If there are no unconditional edges either, the engine falls back to the highest-weight edge regardless of condition.
+
+In plain language: the engine checks each edge's condition. If one matches, it follows that edge. If none match, it picks the unconditional edge with the highest weight.
+
+### The weight attribute
+
+When multiple edges have matching conditions (or multiple unconditional edges exist), the `weight` attribute breaks the tie. Higher weight wins.
+
+```
+Review -> Exit [condition="outcome=success" weight=10]
+Review -> Revise [condition="outcome=success" weight=5]
+```
+
+In this example, both edges match on `outcome=success`, but the edge to Exit has weight 10 and the edge to Revise has weight 5. The engine follows the edge to Exit. If you omit `weight`, it defaults to 0.
+
+### Run the branching pipeline
+
+Validate:
+
+```bash
+uv run attractor validate task-manager-v3.dot
+```
+
+```
+Pipeline 'task_manager' is valid (6 nodes, 6 edges)
+```
+
+Run in dry-run mode:
+
+```bash
+uv run attractor run --dry-run task-manager-v3.dot
+```
+
+```
+Pipeline 'task_manager' completed: success
+Notes: [dry-run] Review
+```
+
+In dry-run mode, every node succeeds. The Review node's outcome is `success`, so the engine follows the `outcome=success` edge to Exit. The Revise node is never visited. To test the failure path, you need a real LLM run where the review actually fails -- or you can use the human review gate introduced in the next chapter.
+
+---
+
+## Chapter 5: Human Review Gates
+
+This chapter replaces the automatic conditional review with a human decision point. The pipeline pauses, presents choices, and waits for a person to decide what happens next.
+
+### Replace diamond with hexagon
+
+The `diamond` shape routes automatically based on outcome. The `hexagon` shape does something different: it pauses the pipeline and asks a human to choose. Change the Review node's shape from `diamond` to `hexagon`, and replace condition-based edges with labeled edges that become selectable options.
+
+Create a new file named `task-manager-v4.dot`:
+
+```dot
+digraph task_manager {
+    goal = "Build a task management API"
+
+    Start [shape=Mdiamond label="Start"]
+
+    Plan [
+        shape=box
+        label="Plan"
+        prompt="Create a detailed project plan for: $goal. List the endpoints, data models, and implementation steps."
+    ]
+
+    Implement [
+        shape=box
+        label="Implement"
+        prompt="Implement the plan from the previous step for: $goal. Write the Python code with FastAPI endpoints and Pydantic models."
+    ]
+
+    // Hexagon shape = wait.human handler.
+    // The pipeline pauses here and presents outgoing edge labels as options.
+    Review [shape=hexagon label="Review"]
+
+    Revise [
+        shape=box
+        label="Revise"
+        prompt="The reviewer rejected the implementation. Revise the code to address the feedback."
+    ]
+
+    Escalate [
+        shape=box
+        label="Escalate"
+        prompt="The reviewer escalated this item. Prepare a summary of the current state for a senior engineer."
+    ]
+
+    Exit [shape=Msquare label="Exit"]
+
+    Start -> Plan
+    Plan -> Implement
+    Implement -> Review
+
+    // Edge labels become selectable options in the human review prompt.
+    // Accelerator keys let the reviewer type a single character to choose.
+    Review -> Exit [label="[A] Approve"]
+    Review -> Revise [label="R) Reject"]
+    Review -> Escalate [label="E - Escalate"]
+    Revise -> Exit
+    Escalate -> Exit
+}
+```
+
+This file lives at [`docs/examples/ch05-human-review.dot`](examples/ch05-human-review.dot) in the repository.
+
+### The hexagon shape
+
+The `hexagon` shape tells Attractor to use the **wait.human** handler. This handler pauses the pipeline and presents the outgoing edge labels as a multiple-choice prompt. The pipeline resumes only after a person (or an automated interviewer) selects an option.
+
+| Shape | Meaning | Handler |
+|---|---|---|
+| `Mdiamond` | Pipeline entry point | start |
+| `Msquare` | Pipeline exit point | exit |
+| `box` | LLM task (default) | codergen |
+| `diamond` | Conditional branch | conditional |
+| `hexagon` | Human review gate | wait.human |
+
+### Edge labels become options
+
+Every outgoing edge from a hexagon node becomes a selectable option. The edge's `label` attribute is the text the reviewer sees. In this example, the Review node has three outgoing edges, so the reviewer sees three choices:
+
+- `[A] Approve` -- follow the edge to Exit
+- `R) Reject` -- follow the edge to Revise
+- `E - Escalate` -- follow the edge to Escalate
+
+The reviewer types their choice, and the engine follows the selected edge.
+
+### Accelerator keys
+
+Accelerator keys let the reviewer type a single character instead of the full label. Attractor recognizes three patterns:
+
+| Pattern | Example | Key |
+|---|---|---|
+| `[K] Label` | `[A] Approve` | A |
+| `K) Label` | `R) Reject` | R |
+| `K - Label` | `E - Escalate` | E |
+
+If you do not use any of these patterns, the accelerator key defaults to the first character of the label. Use explicit accelerator keys when two labels start with the same letter.
+
+### What the reviewer sees
+
+When the pipeline reaches the Review node, it pauses and displays a prompt like this:
+
+```
+Review: Review
+
+Choose an action:
+  [A] Approve
+  [R] Reject
+  [E] Escalate
+
+Your choice:
+```
+
+The reviewer types `A`, `R`, or `E` and presses Enter. The engine matches the input to the corresponding edge and resumes execution. If the reviewer types `A`, the pipeline follows the edge to Exit and completes. If they type `R`, it follows the edge to Revise, which runs the LLM to fix the code, and then continues to Exit.
+
+### Interviewer types
+
+The person or system that answers human review prompts is called an **interviewer**. Attractor provides four interviewer implementations:
+
+| Interviewer | Purpose |
+|---|---|
+| **AutoApprove** | Always picks the first option. Use in CI/CD pipelines where you want the pipeline to run unattended. |
+| **Queue** | Reads from a pre-filled list of answers. Use in automated tests where you need deterministic, repeatable behavior. |
+| **Callback** | Delegates to a custom function you provide. Use when you want to integrate with external systems (Slack, email, webhooks). |
+| **Recording** | Wraps another interviewer and records every question-answer pair. Use for audit trails and compliance. |
+
+In interactive mode (the default), the CLI prompts the user directly in the terminal. The interviewer types listed above are used when you run pipelines programmatically or through the HTTP server.
+
+### Run with a human gate
+
+Validate:
+
+```bash
+uv run attractor validate task-manager-v4.dot
+```
+
+```
+Pipeline 'task_manager' is valid (7 nodes, 8 edges)
+```
+
+In dry-run mode, the engine uses the AutoApprove interviewer by default. It always selects the first option:
+
+```bash
+uv run attractor run --dry-run task-manager-v4.dot
+```
+
+```
+Pipeline 'task_manager' completed: success
+Notes: [dry-run] Review
+```
+
+The AutoApprove interviewer selected `[A] Approve`, so the engine followed the edge to Exit. To test other paths, you can run without `--dry-run` and answer the prompt interactively, or use the Queue interviewer programmatically.
+
+---
+
+## Chapter 6: Iteration Loops
+
+This chapter adds a loop to the pipeline. When the reviewer rejects the work, the pipeline goes back to an earlier step and tries again. This is one of Attractor's most powerful features: the pipeline keeps iterating until the human approves.
+
+### The revise loop
+
+Instead of routing rejected work to a separate Revise node that then exits, you can send it back to Plan. The pipeline re-plans, re-implements, and presents the work for review again. This creates a cycle in the graph.
+
+Create a new file named `task-manager-v5.dot`:
+
+```dot
+digraph task_manager {
+    goal = "Build a task management API"
+
+    Start [shape=Mdiamond label="Start"]
+
+    Plan [
+        shape=box
+        label="Plan"
+        prompt="Create a detailed project plan for: $goal. List the endpoints, data models, and implementation steps."
+        max_retries=3
+    ]
+
+    Implement [
+        shape=box
+        label="Implement"
+        prompt="Implement the plan from the previous step for: $goal. Write the Python code with FastAPI endpoints and Pydantic models."
+        retry_target="Plan"
+    ]
+
+    // Human review gate with a loop-back edge.
+    Review [shape=hexagon label="Review"]
+
+    Exit [shape=Msquare label="Exit"]
+
+    Start -> Plan
+    Plan -> Implement
+    Implement -> Review
+
+    Review -> Exit [label="[A] Approve"]
+    // This edge creates a loop: rejection sends the pipeline back to Plan.
+    Review -> Plan [label="R) Revise"]
+}
+```
+
+This file lives at [`docs/examples/ch06-loops.dot`](examples/ch06-loops.dot) in the repository.
+
+### Why loops are powerful
+
+Without loops, a failed review means the pipeline exits with partial results. You would have to fix the issues manually and re-run the whole pipeline from scratch. With a loop, the pipeline handles iteration for you. The reviewer rejects, the LLM re-plans and re-implements, and the reviewer checks again. This cycle continues until the reviewer approves or the retry limit is reached.
+
+This matches how real teams work: plan, build, review, revise, repeat.
+
+### Preventing infinite loops with max_retries
+
+A loop without a limit can run forever. The `max_retries` attribute on a node sets the maximum number of times that node can execute in a single pipeline run.
+
+```
+Plan [shape=box label="Plan" max_retries=3]
+```
+
+With `max_retries=3`, the Plan node can execute up to 3 times. If the reviewer rejects a third time and the loop would send execution back to Plan, the engine stops the pipeline and reports a failure. Without `max_retries`, the graph-level default applies (50 retries).
+
+Set `max_retries` on the node where the loop re-enters the graph. In this pipeline, that is Plan, because the revise edge points back to Plan.
+
+### The retry_target attribute
+
+The `retry_target` attribute tells the engine where to jump back to when a node fails. Instead of following the normal edges, the engine sends execution directly to the named node.
+
+```
+Implement [shape=box label="Implement" retry_target="Plan"]
+```
+
+With `retry_target="Plan"`, if the Implement node fails (the LLM produces invalid code, for example), the engine jumps back to Plan without waiting for the Review step. This is different from the review loop: `retry_target` handles automatic failure recovery, while the review loop handles human-directed revision.
+
+The key difference: `retry_target` keeps all completed work in context. When the engine jumps back to Plan, the LLM sees what happened in the previous attempt and can adjust. Previous log files and context values remain available.
+
+### The loop_restart attribute
+
+For cases where you want a clean slate, edges can carry the `loop_restart` attribute:
+
+```
+Review -> Plan [label="R) Restart" loop_restart=true]
+```
+
+When the engine follows a `loop_restart` edge, it clears all pipeline state -- context values, node outcomes, accumulated logs -- and restarts from the target node as if the pipeline had just begun. This is useful when previous attempts produced so much noise that starting fresh gives better results.
+
+The difference between the two approaches:
+
+| Attribute | Keeps previous work | When to use |
+|---|---|---|
+| `retry_target` | Yes -- previous context, logs, and outcomes remain | Incremental fixes. The LLM learns from past attempts. |
+| `loop_restart` | No -- clears all state and starts fresh | Complete do-overs. Previous attempts caused more confusion than help. |
+
+Most pipelines use `retry_target` for automatic retries and normal loop-back edges for human-directed revision. Reserve `loop_restart` for situations where accumulated state actively hinders progress.
+
+### Run the loop pipeline
+
+Validate:
+
+```bash
+uv run attractor validate task-manager-v5.dot
+```
+
+```
+Pipeline 'task_manager' is valid (5 nodes, 5 edges)
+```
+
+Run in dry-run mode:
+
+```bash
+uv run attractor run --dry-run task-manager-v5.dot
+```
+
+```
+Pipeline 'task_manager' completed: success
+Notes: [dry-run] Review
+```
+
+As before, dry-run mode uses the AutoApprove interviewer, which selects the first option (`[A] Approve`). The loop is never triggered. To exercise the loop, run without `--dry-run` and choose `R) Revise` at the review prompt. The pipeline will loop back to Plan, re-execute Plan and Implement, and present the Review prompt again -- up to 3 times before it gives up.
+
+Note: the validator accepts this graph despite the back-edge from Review to Plan. Attractor explicitly supports cycles in the graph. The `max_retries` attribute is the safety mechanism that prevents infinite execution.
