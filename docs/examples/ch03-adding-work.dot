@@ -1,0 +1,29 @@
+// ch03-adding-work.dot
+// Expanded pipeline: Start -> Plan -> Implement -> Exit
+// Introduces the prompt attribute with $goal variable expansion.
+
+digraph task_manager {
+    goal = "Build a task management API"
+
+    Start [shape=Mdiamond label="Start"]
+
+    // The prompt attribute overrides the label as the text sent to the LLM.
+    // $goal expands to the graph's goal attribute at runtime.
+    Plan [
+        shape=box
+        label="Plan"
+        prompt="Create a detailed project plan for: $goal. List the endpoints, data models, and implementation steps."
+    ]
+
+    Implement [
+        shape=box
+        label="Implement"
+        prompt="Implement the plan from the previous step for: $goal. Write the Python code with FastAPI endpoints and Pydantic models."
+    ]
+
+    Exit [shape=Msquare label="Exit"]
+
+    Start -> Plan
+    Plan -> Implement
+    Implement -> Exit
+}

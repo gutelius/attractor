@@ -1,0 +1,27 @@
+// ch02-first-pipeline.dot
+// A minimal 3-node pipeline: Start -> Plan -> Exit
+// This is the simplest pipeline Attractor can run.
+
+digraph task_manager {
+    // The goal attribute is a one-sentence summary of what this pipeline builds.
+    // Every node can reference it via $goal in prompts.
+    goal = "Build a task management API"
+
+    // Start node: shape=Mdiamond marks the pipeline entry point.
+    // The engine begins execution here.
+    Start [shape=Mdiamond label="Start"]
+
+    // Plan node: shape=box (the default) marks an LLM task node.
+    // The label serves as both the display name and the default prompt
+    // sent to the LLM backend.
+    Plan [shape=box label="Plan the task management API"]
+
+    // Exit node: shape=Msquare marks the pipeline exit point.
+    // The engine stops here and reports the final outcome.
+    Exit [shape=Msquare label="Exit"]
+
+    // Edges define execution order. The engine follows these arrows
+    // from Start through every node until it reaches Exit.
+    Start -> Plan
+    Plan -> Exit
+}
