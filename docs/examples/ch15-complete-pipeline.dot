@@ -1,0 +1,138 @@
+// ch15-complete-pipeline.dot
+// The complete task management API pipeline from the Attractor tutorial.
+// Combines every concept from chapters 1-14: shapes, conditions, human gates,
+// goal gates, tool nodes, context, fidelity, stylesheet, and parallel branches.
+
+digraph task_manager {
+    // --- Graph-level attributes ---
+    // The goal is the north star. Every goal_gate node is judged against it.
+    goal = "Build a task management API with CRUD endpoints, authentication, and pagination"
+
+    // --- Model stylesheet ---
+    // Fast default for drafting. Stronger models for critical evaluation.
+    // The #EvalPRD override uses the strongest model for final judgment.
+    model_stylesheet = "
+        * {
+            llm_model: claude-haiku-3-5;
+            reasoning_effort: low;
+        }
+        .critical {
+            llm_model: claude-sonnet-4-20250514;
+            reasoning_effort: high;
+        }
+        #EvalPRD {
+            llm_model: claude-opus-4-20250514;
+            reasoning_effort: high;
+        }
+    "
+
+    // --- Entry point ---
+    // Mdiamond = start handler. Every pipeline begins here.
+    Start [shape=Mdiamond label="Start"]
+
+    // --- PRD phase ---
+    // box = codergen handler. The LLM generates a PRD from the goal.
+    WritePRD [
+        shape=box
+        label="Write PRD"
+        prompt="Write a product requirements document for: $goal. Include user stories, acceptance criteria, API contract, data models, error handling requirements, and non-functional requirements."
+    ]
+
+    // hexagon = wait.human handler. Pauses for a person to approve or reject.
+    ReviewPRD [shape=hexagon label="Review PRD"]
+
+    // --- Design phase ---
+    DesignArch [
+        shape=box
+        label="Design Architecture"
+        prompt="Based on the PRD, create a technical design document for: $goal. Cover project structure, module decomposition, API routes, database schema, authentication flow, error handling, and test plan."
+    ]
+
+    ReviewDesign [shape=hexagon label="Review Design"]
+
+    // --- Implementation phase ---
+    // goal_gate=true means the exit handler checks this node's outcome.
+    // retry_target="DesignArch" means failure loops back to redesign.
+    Implement [
+        shape=box
+        label="Implement"
+        prompt="Implement the system described in the design document. Write production-ready Python code using FastAPI, Pydantic, and SQLite. Follow the architecture exactly."
+        goal_gate=true
+        retry_target="DesignArch"
+        max_retries=3
+    ]
+
+    // --- Parallel validation branches ---
+    // parallel shape = fan-out. Runs both branches concurrently.
+    ValidationFork [shape=parallel label="Validation Fork"]
+
+    // parallelogram = tool handler. Runs a shell command.
+    RunTests [
+        shape=parallelogram
+        label="Run Tests"
+        tool_command="cd workspace && uv run pytest tests/ -v --tb=short"
+        timeout="120s"
+    ]
+
+    LintCheck [
+        shape=parallelogram
+        label="Lint Check"
+        tool_command="cd workspace && uv run ruff check . --output-format=concise"
+        timeout="30s"
+    ]
+
+    // parallel.fan_in shape = fan-in. Waits for both branches, picks best.
+    ValidationJoin [shape=parallel_fan_in label="Validation Join"]
+
+    // --- Evaluation phase ---
+    // Uses the strongest model (set by #EvalPRD in the stylesheet).
+    // goal_gate=true + retry_target="Implement" forces a rework loop
+    // if the evaluation finds gaps against the PRD.
+    EvalPRD [
+        shape=box
+        label="Evaluate Against PRD"
+        prompt="You are a quality auditor. Compare the implementation against the original PRD. Check every user story and acceptance criterion. Return success only if all requirements are met. Return fail with a detailed gap list otherwise."
+        goal_gate=true
+        retry_target="Implement"
+    ]
+
+    // --- Final human gate ---
+    FinalReview [shape=hexagon label="Final Review"]
+
+    // --- Exit point ---
+    // Msquare = exit handler. Checks all goal_gate nodes before completing.
+    Exit [shape=Msquare label="Exit"]
+
+    // --- Subgraph classes for stylesheet targeting ---
+    subgraph critical {
+        EvalPRD
+        DesignArch
+        Implement
+    }
+
+    // --- Edges: the execution order ---
+
+    // PRD phase
+    Start -> WritePRD
+    WritePRD -> ReviewPRD
+    ReviewPRD -> DesignArch [label="[A] Approve"]
+    ReviewPRD -> WritePRD [label="R) Revise"]
+
+    // Design phase
+    DesignArch -> ReviewDesign
+    ReviewDesign -> Implement [label="[A] Approve"]
+    ReviewDesign -> DesignArch [label="R) Revise"]
+
+    // Implementation -> parallel validation
+    Implement -> ValidationFork
+    ValidationFork -> RunTests
+    ValidationFork -> LintCheck
+    RunTests -> ValidationJoin
+    LintCheck -> ValidationJoin
+
+    // Evaluation and sign-off
+    ValidationJoin -> EvalPRD
+    EvalPRD -> FinalReview
+    FinalReview -> Exit [label="[A] Ship it"]
+    FinalReview -> Implement [label="R) Rework"]
+}

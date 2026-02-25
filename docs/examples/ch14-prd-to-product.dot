@@ -1,0 +1,92 @@
+// ch14-prd-to-product.dot
+// Full lifecycle pipeline: idea -> PRD -> design -> implement -> validate -> ship.
+// The WritePRD node generates a PRD from the goal. ReviewPRD pauses for
+// human approval. DesignArch creates an architecture spec. Implement builds
+// the product. RunTests validates it. EvalPRD uses a stronger model to
+// judge the output against the PRD. FinalReview is the human sign-off.
+
+digraph prd_to_product {
+    goal = "Build a task management API with CRUD endpoints, authentication, and pagination"
+
+    model_stylesheet = "
+        * {
+            llm_model: claude-haiku-3-5;
+            reasoning_effort: low;
+        }
+        .review {
+            llm_model: claude-sonnet-4-20250514;
+            reasoning_effort: high;
+        }
+        #EvalPRD {
+            llm_model: claude-opus-4-20250514;
+            reasoning_effort: high;
+        }
+    "
+
+    Start [shape=Mdiamond label="Start"]
+
+    WritePRD [
+        shape=box
+        label="Write PRD"
+        prompt="Write a product requirements document for: $goal. Include user stories, acceptance criteria, API contract, data models, error handling requirements, and non-functional requirements (performance, security). Output the PRD as structured markdown."
+    ]
+
+    ReviewPRD [shape=hexagon label="Review PRD"]
+
+    DesignArch [
+        shape=box
+        label="Design Architecture"
+        prompt="Based on the PRD from the previous step, create a technical design document for: $goal. Cover: project structure, module decomposition, API route definitions, database schema, authentication flow, error handling strategy, and test plan."
+    ]
+
+    ReviewDesign [shape=hexagon label="Review Design"]
+
+    Implement [
+        shape=box
+        label="Implement"
+        prompt="Implement the system described in the design document. Write production-ready Python code using FastAPI, Pydantic models, and SQLite. Follow the architecture exactly. Include all endpoints, models, middleware, and configuration."
+        goal_gate=true
+        retry_target="DesignArch"
+    ]
+
+    RunTests [
+        shape=parallelogram
+        label="Run Tests"
+        tool_command="cd workspace && uv run pytest tests/ -v --tb=short"
+        timeout="120s"
+    ]
+
+    EvalPRD [
+        shape=box
+        label="Evaluate Against PRD"
+        prompt="You are a quality auditor. Compare the implementation against the original PRD requirements. Check every user story and acceptance criterion. Return success only if all requirements are met. If any requirement is missing or incorrect, return fail with a detailed list of gaps."
+        goal_gate=true
+        retry_target="Implement"
+    ]
+
+    FinalReview [shape=hexagon label="Final Review"]
+
+    Exit [shape=Msquare label="Exit"]
+
+    subgraph review {
+        EvalPRD
+        DesignArch
+    }
+
+    Start -> WritePRD
+    WritePRD -> ReviewPRD
+
+    ReviewPRD -> DesignArch [label="[A] Approve"]
+    ReviewPRD -> WritePRD [label="R) Revise"]
+
+    DesignArch -> ReviewDesign
+    ReviewDesign -> Implement [label="[A] Approve"]
+    ReviewDesign -> DesignArch [label="R) Revise"]
+
+    Implement -> RunTests
+    RunTests -> EvalPRD
+    EvalPRD -> FinalReview
+
+    FinalReview -> Exit [label="[A] Ship it"]
+    FinalReview -> Implement [label="R) Rework"]
+}

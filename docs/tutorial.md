@@ -1633,3 +1633,603 @@ Skip checkpoints for:
 
 - **Quick iterations during development** -- dry-run mode is faster and does not need recovery.
 - **Pipelines under 5 nodes** -- re-running from scratch takes seconds.
+
+---
+
+## Chapter 13: Running the HTTP Server
+
+Every chapter so far used the CLI. The CLI is the right tool when you sit at a terminal and run pipelines interactively. But pipelines also need to run from other software: dashboards, CI/CD systems, monitoring tools, Slack bots. The HTTP server exposes the same engine over a REST API with real-time event streaming.
+
+### Start the server
+
+```bash
+uv run attractor serve --port 8000
+```
+
+The server binds to `0.0.0.0:8000` by default. You see Uvicorn's startup log:
+
+```
+INFO:     Started server process
+INFO:     Uvicorn running on http://0.0.0.0:8000
+```
+
+The `--host` flag controls the bind address if you need to restrict it:
+
+```bash
+uv run attractor serve --host 127.0.0.1 --port 8000
+```
+
+### Submit a pipeline
+
+POST the DOT source and a goal to `/pipelines`:
+
+```bash
+curl -X POST http://localhost:8000/pipelines \
+  -H "Content-Type: application/json" \
+  -d '{
+    "dot_source": "digraph t { goal=\"Build a task API\" Start [shape=Mdiamond] Plan [shape=box prompt=\"Plan: $goal\"] Exit [shape=Msquare] Start -> Plan -> Exit }",
+    "goal": "Build a task management API",
+    "log_dir": "/tmp/my-run"
+  }'
+```
+
+The server parses the DOT, validates the graph, and starts execution in the background. It returns immediately:
+
+```json
+{"id": "a1b2c3d4", "status": "running"}
+```
+
+The `id` is your handle for every subsequent request. The `log_dir` field is optional -- if omitted, logs go to `/tmp/attractor-server/<id>`.
+
+If the DOT source has a parse error or fails validation, the server returns a 400:
+
+```json
+{"detail": "Parse error: unexpected token at line 3"}
+```
+
+### Check status
+
+GET `/pipelines/{id}` to poll the current state:
+
+```bash
+curl http://localhost:8000/pipelines/a1b2c3d4
+```
+
+```json
+{
+  "id": "a1b2c3d4",
+  "status": "running",
+  "event_count": 3
+}
+```
+
+The `status` field moves through these values:
+
+| Status | Meaning |
+|--------|---------|
+| `running` | Pipeline is executing |
+| `completed` | All nodes finished, goal gates passed |
+| `failed` | A node failed and the pipeline could not recover |
+| `error` | An unexpected exception occurred |
+| `cancelled` | You cancelled it |
+
+When the pipeline finishes, the response includes the outcome:
+
+```json
+{
+  "id": "a1b2c3d4",
+  "status": "completed",
+  "event_count": 8,
+  "outcome": "success",
+  "notes": "All goal gates passed"
+}
+```
+
+### Stream events
+
+Polling works, but streaming is better. The `/pipelines/{id}/events` endpoint sends Server-Sent Events (SSE) as nodes execute:
+
+```bash
+curl -N http://localhost:8000/pipelines/a1b2c3d4/events
+```
+
+The `-N` flag disables curl's output buffering so events appear in real time. Each event is a JSON object on a `data:` line:
+
+```
+data: {"kind": "pipeline.start", "node_id": "", "data": {"name": "task_manager", "goal": "Build a task management API"}}
+
+data: {"kind": "node.start", "node_id": "Plan", "data": {}}
+
+data: {"kind": "node.complete", "node_id": "Plan", "data": {"status": "success"}}
+
+data: {"kind": "node.start", "node_id": "Implement", "data": {}}
+
+data: {"kind": "node.complete", "node_id": "Implement", "data": {"status": "success"}}
+
+data: {"kind": "node.retry", "node_id": "Implement", "data": {"attempt": 1, "reason": "retry requested"}}
+
+data: {"kind": "goal_gate.retry", "node_id": "Evaluate", "data": {"target": "Plan", "reason": "goal gate failed"}}
+
+data: {"kind": "pipeline.complete", "node_id": "Exit", "data": {}}
+
+data: {"kind": "done", "status": "completed"}
+```
+
+The event kinds map directly to engine actions:
+
+| Event kind | When it fires |
+|------------|---------------|
+| `pipeline.start` | Pipeline begins. Data includes name and goal. |
+| `node.start` | A node begins execution. |
+| `node.complete` | A node finishes. Data includes status (`success` or `fail`). |
+| `node.retry` | A node is retrying. Data includes attempt number and reason. |
+| `goal_gate.retry` | A goal gate failed and the engine loops back. Data includes the retry target. |
+| `loop.restart` | An edge sends execution back to an earlier node. |
+| `pipeline.complete` | Pipeline finished normally. |
+| `pipeline.error` | Pipeline hit an unrecoverable error. |
+| `done` | Terminal event. The stream closes after this. |
+
+The `done` event always comes last. When you receive it, close the connection.
+
+### Cancel a pipeline
+
+POST to `/pipelines/{id}/cancel` to stop a running pipeline:
+
+```bash
+curl -X POST http://localhost:8000/pipelines/a1b2c3d4/cancel
+```
+
+```json
+{"id": "a1b2c3d4", "status": "cancelled"}
+```
+
+Cancellation sets the status to `cancelled`. Any in-flight LLM call finishes but the engine does not advance to the next node.
+
+### Get the graph structure
+
+GET `/pipelines/{id}/graph` returns the parsed graph as JSON:
+
+```bash
+curl http://localhost:8000/pipelines/a1b2c3d4/graph
+```
+
+```json
+{
+  "name": "task_manager",
+  "goal": "Build a task management API",
+  "nodes": ["Start", "Plan", "Implement", "Evaluate", "RunTests", "Review", "Exit"],
+  "edges": [
+    {"source": "Start", "target": "Plan", "label": ""},
+    {"source": "Plan", "target": "Implement", "label": ""},
+    {"source": "Implement", "target": "Evaluate", "label": ""},
+    {"source": "Review", "target": "Exit", "label": "[A] Approve"},
+    {"source": "Review", "target": "Plan", "label": "R) Revise"}
+  ]
+}
+```
+
+This is useful for building visual pipeline displays. A dashboard can fetch the graph once, render the node layout, then use SSE events to highlight the active node.
+
+### Get pipeline context
+
+GET `/pipelines/{id}/context` returns the current event count:
+
+```bash
+curl http://localhost:8000/pipelines/a1b2c3d4/context
+```
+
+```json
+{"pipeline_id": "a1b2c3d4", "event_count": 5}
+```
+
+### When to use the server vs. the CLI
+
+**Use the CLI when:**
+- You run pipelines interactively from a terminal
+- You iterate on DOT files during development
+- You need dry-run mode to test graph structure
+- You want checkpoint-based resume
+
+**Use the server when:**
+- Another program needs to trigger pipelines (CI/CD, Slack bots, cron jobs)
+- You build a dashboard that displays pipeline progress in real time
+- Multiple users submit pipelines concurrently
+- You need a stable API contract for integration testing
+
+The server and CLI share the same engine. A pipeline that works with `attractor run` works identically when submitted to the server.
+
+---
+
+## Chapter 14: From PRD to Product
+
+The pipelines so far build one thing: a task management API. But in practice, the interesting question is not "how do I run a pipeline" -- it is "how do I go from an idea to a shipped product?" This chapter shows the full lifecycle: idea, PRD, design, implementation, validation, and sign-off.
+
+### Two patterns for PRD input
+
+A PRD (product requirements document) can enter the pipeline two ways.
+
+**Pattern 1: External PRD.** A PM writes a PRD in a markdown file. The pipeline prompt references it directly:
+
+```dot
+Implement [
+    shape=box
+    prompt="Read the PRD at ./prd.md and implement the requirements for $goal"
+]
+```
+
+This works when the PRD already exists and you want the pipeline to execute against a fixed spec. The LLM reads the file through its tool-use capabilities.
+
+**Pattern 2: Generated PRD.** A node early in the pipeline generates the PRD from the goal. Later nodes read it from context. This is what we build here -- the pipeline creates its own spec, gets human approval, then implements against that spec.
+
+### The lifecycle pipeline
+
+The full pipeline has ten nodes arranged in five phases:
+
+1. **Generate** -- the LLM writes a PRD from the goal
+2. **Review** -- a human approves or rejects the PRD
+3. **Design** -- the LLM creates an architecture spec
+4. **Build** -- the LLM implements the code, then tests validate it
+5. **Evaluate** -- a stronger model judges the output against the PRD
+
+Here is the complete DOT file:
+
+```dot
+// ch14-prd-to-product.dot
+digraph prd_to_product {
+    goal = "Build a task management API with CRUD endpoints, authentication, and pagination"
+
+    model_stylesheet = "
+        * {
+            llm_model: claude-haiku-3-5;
+            reasoning_effort: low;
+        }
+        .review {
+            llm_model: claude-sonnet-4-20250514;
+            reasoning_effort: high;
+        }
+        #EvalPRD {
+            llm_model: claude-opus-4-20250514;
+            reasoning_effort: high;
+        }
+    "
+
+    Start [shape=Mdiamond label="Start"]
+
+    WritePRD [
+        shape=box
+        label="Write PRD"
+        prompt="Write a product requirements document for: $goal. Include user stories, acceptance criteria, API contract, data models, error handling requirements, and non-functional requirements (performance, security). Output the PRD as structured markdown."
+    ]
+
+    ReviewPRD [shape=hexagon label="Review PRD"]
+
+    DesignArch [
+        shape=box
+        label="Design Architecture"
+        prompt="Based on the PRD from the previous step, create a technical design document for: $goal. Cover: project structure, module decomposition, API route definitions, database schema, authentication flow, error handling strategy, and test plan."
+    ]
+
+    ReviewDesign [shape=hexagon label="Review Design"]
+
+    Implement [
+        shape=box
+        label="Implement"
+        prompt="Implement the system described in the design document. Write production-ready Python code using FastAPI, Pydantic models, and SQLite. Follow the architecture exactly. Include all endpoints, models, middleware, and configuration."
+        goal_gate=true
+        retry_target="DesignArch"
+    ]
+
+    RunTests [
+        shape=parallelogram
+        label="Run Tests"
+        tool_command="cd workspace && uv run pytest tests/ -v --tb=short"
+        timeout="120s"
+    ]
+
+    EvalPRD [
+        shape=box
+        label="Evaluate Against PRD"
+        prompt="You are a quality auditor. Compare the implementation against the original PRD requirements. Check every user story and acceptance criterion. Return success only if all requirements are met. If any requirement is missing or incorrect, return fail with a detailed list of gaps."
+        goal_gate=true
+        retry_target="Implement"
+    ]
+
+    FinalReview [shape=hexagon label="Final Review"]
+
+    Exit [shape=Msquare label="Exit"]
+
+    subgraph review {
+        EvalPRD
+        DesignArch
+    }
+
+    Start -> WritePRD
+    WritePRD -> ReviewPRD
+
+    ReviewPRD -> DesignArch [label="[A] Approve"]
+    ReviewPRD -> WritePRD [label="R) Revise"]
+
+    DesignArch -> ReviewDesign
+    ReviewDesign -> Implement [label="[A] Approve"]
+    ReviewDesign -> DesignArch [label="R) Revise"]
+
+    Implement -> RunTests
+    RunTests -> EvalPRD
+    EvalPRD -> FinalReview
+
+    FinalReview -> Exit [label="[A] Ship it"]
+    FinalReview -> Implement [label="R) Rework"]
+}
+```
+
+This file lives at [`docs/examples/ch14-prd-to-product.dot`](examples/ch14-prd-to-product.dot) in the repository.
+
+### Walk-through
+
+**WritePRD** (box / codergen). The LLM takes the goal and produces a full PRD: user stories, acceptance criteria, API contracts, data models. The output goes into context for every subsequent node to read.
+
+**ReviewPRD** (hexagon / wait.human). The pipeline pauses. You read the generated PRD, then choose Approve or Revise. If you reject it, the pipeline loops back to WritePRD with your feedback.
+
+**DesignArch** (box / codergen). Given the approved PRD, the LLM creates a technical design: project layout, module boundaries, database schema, auth flow. The `.review` class in the stylesheet assigns a stronger model here -- architecture decisions warrant better reasoning.
+
+**ReviewDesign** (hexagon / wait.human). Another human checkpoint. Approve the design or send it back for revision.
+
+**Implement** (box / codergen, `goal_gate=true`, `retry_target="DesignArch"`). The LLM writes the code. The goal gate means the exit handler will check this node. If the downstream evaluation fails, the engine loops back to DesignArch to revise the design before trying again.
+
+**RunTests** (parallelogram / tool). Executes `pytest` against the generated code. The 120-second timeout gives large test suites room to run. Test output flows into context so the evaluation node can reference specific failures.
+
+**EvalPRD** (box / codergen, `goal_gate=true`, `retry_target="Implement"`). This is the judge. The `#EvalPRD` stylesheet rule assigns `claude-opus-4-20250514` -- the strongest available model. It compares every PRD requirement against the implementation. If anything is missing, it returns fail with a gap list, and the engine loops back to Implement.
+
+**FinalReview** (hexagon / wait.human). The last gate. A human reviews the implementation, test results, and evaluation report. Ship it or send it back.
+
+### The model stylesheet strategy
+
+The stylesheet assigns models by role:
+
+| Selector | Model | Reasoning | Why |
+|----------|-------|-----------|-----|
+| `*` | claude-haiku-3-5 | low | Fast drafting for most nodes |
+| `.review` | claude-sonnet-4-20250514 | high | Architecture and evaluation need stronger reasoning |
+| `#EvalPRD` | claude-opus-4-20250514 | high | Final judgment against PRD demands the best model |
+
+The WritePRD node uses the default (Haiku). Writing a first draft is fast work -- the human review catches problems. But the evaluation node needs to reason carefully about whether every requirement is satisfied, so it gets Opus.
+
+### The retry loop
+
+Two goal gates create two retry loops:
+
+1. **EvalPRD fails** -> loops to Implement. The implementation did not satisfy the PRD. The LLM re-implements with the gap list in context.
+2. **Implement fails** (after retries) -> loops to DesignArch. The design itself was flawed. The LLM revises the architecture.
+
+This two-tier retry separates "bad code" from "bad design." Most failures resolve at the Implement level. If the same implementation keeps failing, the problem is upstream in the design.
+
+---
+
+## Chapter 15: The Complete Pipeline
+
+This chapter brings everything together. The pipeline below combines every concept from chapters 1 through 14: entry and exit nodes, codergen nodes, human gates, goal gates, tool nodes, parallel branches, a model stylesheet, and retry loops. It is the task management API pipeline in its final form.
+
+### The full DOT file
+
+```dot
+// ch15-complete-pipeline.dot
+digraph task_manager {
+    // --- Graph-level attributes ---
+    // The goal is the north star. Every goal_gate node is judged against it.
+    goal = "Build a task management API with CRUD endpoints, authentication, and pagination"
+
+    // --- Model stylesheet ---
+    // Fast default for drafting. Stronger models for critical evaluation.
+    // The #EvalPRD override uses the strongest model for final judgment.
+    model_stylesheet = "
+        * {
+            llm_model: claude-haiku-3-5;
+            reasoning_effort: low;
+        }
+        .critical {
+            llm_model: claude-sonnet-4-20250514;
+            reasoning_effort: high;
+        }
+        #EvalPRD {
+            llm_model: claude-opus-4-20250514;
+            reasoning_effort: high;
+        }
+    "
+
+    // --- Entry point ---
+    // Mdiamond = start handler. Every pipeline begins here.
+    Start [shape=Mdiamond label="Start"]
+
+    // --- PRD phase ---
+    // box = codergen handler. The LLM generates a PRD from the goal.
+    WritePRD [
+        shape=box
+        label="Write PRD"
+        prompt="Write a product requirements document for: $goal. Include user stories, acceptance criteria, API contract, data models, error handling requirements, and non-functional requirements."
+    ]
+
+    // hexagon = wait.human handler. Pauses for a person to approve or reject.
+    ReviewPRD [shape=hexagon label="Review PRD"]
+
+    // --- Design phase ---
+    DesignArch [
+        shape=box
+        label="Design Architecture"
+        prompt="Based on the PRD, create a technical design document for: $goal. Cover project structure, module decomposition, API routes, database schema, authentication flow, error handling, and test plan."
+    ]
+
+    ReviewDesign [shape=hexagon label="Review Design"]
+
+    // --- Implementation phase ---
+    // goal_gate=true means the exit handler checks this node's outcome.
+    // retry_target="DesignArch" means failure loops back to redesign.
+    Implement [
+        shape=box
+        label="Implement"
+        prompt="Implement the system described in the design document. Write production-ready Python code using FastAPI, Pydantic, and SQLite. Follow the architecture exactly."
+        goal_gate=true
+        retry_target="DesignArch"
+        max_retries=3
+    ]
+
+    // --- Parallel validation branches ---
+    // parallel shape = fan-out. Runs both branches concurrently.
+    ValidationFork [shape=parallel label="Validation Fork"]
+
+    // parallelogram = tool handler. Runs a shell command.
+    RunTests [
+        shape=parallelogram
+        label="Run Tests"
+        tool_command="cd workspace && uv run pytest tests/ -v --tb=short"
+        timeout="120s"
+    ]
+
+    LintCheck [
+        shape=parallelogram
+        label="Lint Check"
+        tool_command="cd workspace && uv run ruff check . --output-format=concise"
+        timeout="30s"
+    ]
+
+    // parallel.fan_in shape = fan-in. Waits for both branches, picks best.
+    ValidationJoin [shape=parallel_fan_in label="Validation Join"]
+
+    // --- Evaluation phase ---
+    // Uses the strongest model (set by #EvalPRD in the stylesheet).
+    // goal_gate=true + retry_target="Implement" forces a rework loop
+    // if the evaluation finds gaps against the PRD.
+    EvalPRD [
+        shape=box
+        label="Evaluate Against PRD"
+        prompt="You are a quality auditor. Compare the implementation against the original PRD. Check every user story and acceptance criterion. Return success only if all requirements are met. Return fail with a detailed gap list otherwise."
+        goal_gate=true
+        retry_target="Implement"
+    ]
+
+    // --- Final human gate ---
+    FinalReview [shape=hexagon label="Final Review"]
+
+    // --- Exit point ---
+    // Msquare = exit handler. Checks all goal_gate nodes before completing.
+    Exit [shape=Msquare label="Exit"]
+
+    // --- Subgraph classes for stylesheet targeting ---
+    subgraph critical {
+        EvalPRD
+        DesignArch
+        Implement
+    }
+
+    // --- Edges: the execution order ---
+
+    // PRD phase
+    Start -> WritePRD
+    WritePRD -> ReviewPRD
+    ReviewPRD -> DesignArch [label="[A] Approve"]
+    ReviewPRD -> WritePRD [label="R) Revise"]
+
+    // Design phase
+    DesignArch -> ReviewDesign
+    ReviewDesign -> Implement [label="[A] Approve"]
+    ReviewDesign -> DesignArch [label="R) Revise"]
+
+    // Implementation -> parallel validation
+    Implement -> ValidationFork
+    ValidationFork -> RunTests
+    ValidationFork -> LintCheck
+    RunTests -> ValidationJoin
+    LintCheck -> ValidationJoin
+
+    // Evaluation and sign-off
+    ValidationJoin -> EvalPRD
+    EvalPRD -> FinalReview
+    FinalReview -> Exit [label="[A] Ship it"]
+    FinalReview -> Implement [label="R) Rework"]
+}
+```
+
+This file lives at [`docs/examples/ch15-complete-pipeline.dot`](examples/ch15-complete-pipeline.dot) in the repository.
+
+### Section-by-section breakdown
+
+**Graph attributes.** Two lines set the stage. `goal` declares what the pipeline builds. `model_stylesheet` assigns models by tier so you never touch per-node model attributes.
+
+**Start node** (`Mdiamond`). The entry point. The start handler initializes the pipeline context with the goal and passes control to the first real node.
+
+**PRD phase** (WritePRD + ReviewPRD). The LLM generates a product requirements document from the goal. A human reviews it. Rejection loops back to regeneration. This is the "Generated PRD" pattern from Chapter 14.
+
+**Design phase** (DesignArch + ReviewDesign). The LLM translates the approved PRD into a technical design. Another human gate. Two approval checkpoints before any code is written.
+
+**Implementation** (Implement). The LLM writes the code. Three attributes control its behavior: `goal_gate=true` ensures the exit handler checks it, `retry_target="DesignArch"` loops back to redesign on persistent failure, and `max_retries=3` caps the retry count.
+
+**Parallel validation** (ValidationFork + RunTests + LintCheck + ValidationJoin). After implementation, two tool nodes run concurrently: pytest for correctness and ruff for code quality. The fan-in node waits for both to finish. This is the parallel pattern from Chapter 8 combined with tool nodes from Chapter 9.
+
+**Evaluation** (EvalPRD). The strongest model compares the implementation against the PRD. The `#EvalPRD` stylesheet rule overrides the model to Opus. If the evaluation fails, the engine loops back to Implement -- not to DesignArch -- because evaluation failures are usually code-level gaps, not design flaws.
+
+**Final review** (FinalReview). One last human gate. Ship it or rework.
+
+**Exit** (`Msquare`). The exit handler collects outcomes from all goal_gate nodes (Implement and EvalPRD). If any failed, the engine retries using their `retry_target`. Only when all gates pass does the pipeline exit with success.
+
+**Subgraph** (`critical`). Groups EvalPRD, DesignArch, and Implement into the `.critical` class. The stylesheet assigns `claude-sonnet-4-20250514` with high reasoning effort to these nodes. EvalPRD gets a further override to Opus.
+
+### Render the graph
+
+If you have Graphviz installed, render the pipeline as an SVG:
+
+```bash
+dot -Tsvg docs/examples/ch15-complete-pipeline.dot -o pipeline.svg
+```
+
+Open `pipeline.svg` in a browser to see the full graph with all nodes, edges, and labels. The visual layout makes the retry loops and parallel branches obvious in a way that reading the DOT source does not.
+
+### Run it
+
+Validate first:
+
+```bash
+uv run attractor validate docs/examples/ch15-complete-pipeline.dot
+```
+
+Dry-run to verify the execution path:
+
+```bash
+uv run attractor run --dry-run docs/examples/ch15-complete-pipeline.dot
+```
+
+Or submit it to the server:
+
+```bash
+uv run attractor serve --port 8000 &
+
+curl -X POST http://localhost:8000/pipelines \
+  -H "Content-Type: application/json" \
+  -d "{\"dot_source\": \"$(cat docs/examples/ch15-complete-pipeline.dot | sed 's/"/\\"/g')\", \"goal\": \"Build a task management API\"}"
+```
+
+### What you have learned
+
+Over fifteen chapters, you built a pipeline from a two-node skeleton to a production-grade workflow. Here is what you covered:
+
+| Chapter | Concept | Shape / Feature |
+|---------|---------|-----------------|
+| 1 | Installation | `uv sync`, CLI commands |
+| 2 | First pipeline | `Mdiamond` (start), `Msquare` (exit) |
+| 3 | Adding work | `box` (codergen), `prompt`, `goal` |
+| 4 | Branching | `diamond` (conditional), `outcome=` edges |
+| 5 | Human gates | `hexagon` (wait.human), labeled edges as options |
+| 6 | Loops | Backward edges, `max_retries` |
+| 7 | Quality gates | `goal_gate=true`, `retry_target` |
+| 8 | Parallel branches | `parallel` (fan-out), `parallel_fan_in` (fan-in) |
+| 9 | Tool nodes | `parallelogram` (tool), `tool_command`, `timeout` |
+| 10 | Model stylesheet | `model_stylesheet`, CSS selectors, subgraph classes |
+| 11 | Context and fidelity | Context keys, fidelity settings, thread management |
+| 12 | Checkpoints | `checkpoint_enabled`, resume from crash |
+| 13 | HTTP server | `attractor serve`, REST API, SSE streaming |
+| 14 | PRD to product | Generated PRD, multi-phase review, evaluation loops |
+| 15 | Complete pipeline | All concepts combined |
+
+### Where to go next
+
+- **Cookbook** -- ready-made patterns for common workflows. Copy a pattern, adapt the prompts, run it.
+- **Concepts** -- deeper explanations of how the engine, handlers, context, and fidelity system work under the hood.
+- **Reference** -- every node attribute, edge attribute, graph attribute, CLI flag, and API endpoint in one place.
