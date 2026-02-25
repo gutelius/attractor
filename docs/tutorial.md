@@ -1222,3 +1222,414 @@ Notes: [dry-run] RunTests
 In dry-run mode, the tool node is simulated -- no shell command executes. To see the tool in action, run without `--dry-run` in a project directory that has a `tests/` folder and `pytest` installed. The engine will execute the command, capture the output, and store it in context for the Review step.
 
 Note: tool nodes require that the command exists on the host machine. If `pytest` is not installed or the `workspace` directory does not exist, the tool node fails with an appropriate error message.
+
+---
+
+## Chapter 10: Model Stylesheet
+
+The pipeline now has eight nodes. Setting `llm_model` on each one is tedious and error-prone. The model stylesheet solves this: one block of CSS-like rules that assigns models, providers, and reasoning effort across the entire graph.
+
+### The problem with per-node configuration
+
+Without a stylesheet, you repeat yourself:
+
+```dot
+Plan [shape=box llm_model="claude-haiku-3-5" ...]
+Implement [shape=box llm_model="claude-haiku-3-5" ...]
+Evaluate [shape=box llm_model="claude-opus-4-20250514" ...]
+FinalReview [shape=box llm_model="claude-sonnet-4-20250514" ...]
+```
+
+Four nodes, three different models, and the default is scattered across the file. Change your mind about the default model and you touch every node. A stylesheet centralizes these decisions.
+
+### Add a model_stylesheet
+
+Add a `model_stylesheet` attribute to the graph:
+
+```dot
+digraph task_manager {
+    goal = "Build a task management API"
+
+    model_stylesheet = "
+        * {
+            llm_model: claude-haiku-3-5;
+            reasoning_effort: low;
+        }
+        .critical {
+            llm_model: claude-sonnet-4-20250514;
+            reasoning_effort: high;
+        }
+        #Evaluate {
+            llm_model: claude-opus-4-20250514;
+        }
+    "
+    ...
+}
+```
+
+The syntax mirrors CSS. Each rule has a selector, a pair of braces, and semicolon-terminated declarations.
+
+### Selectors and specificity
+
+Three selector types control which nodes a rule matches:
+
+| Selector | Example | Specificity | Matches |
+|----------|---------|-------------|---------|
+| `*` | `*` | 0 | All nodes |
+| `.classname` | `.critical` | 1 | Nodes in a subgraph named `classname` or with that class |
+| `#NodeId` | `#Evaluate` | 2 | A single node by ID |
+
+Higher specificity wins. When two rules have equal specificity, the later rule wins. Explicit node attributes (set directly on the node) always override the stylesheet.
+
+In the example above, the `*` rule sets every node to `claude-haiku-3-5` with low reasoning effort. The `.critical` rule overrides that for nodes in the `critical` class. The `#Evaluate` rule overrides the model (but not reasoning effort) for the Evaluate node alone.
+
+### Properties
+
+The stylesheet supports three properties:
+
+- **`llm_model`** -- the model identifier (e.g., `claude-sonnet-4-20250514`)
+- **`llm_provider`** -- the provider name (e.g., `anthropic`, `openai`)
+- **`reasoning_effort`** -- `low`, `medium`, or `high`
+
+Any other property names are ignored.
+
+### Subgraphs as classes
+
+Subgraphs in DOT create classes. Declare a subgraph and list the nodes that belong to it:
+
+```dot
+subgraph critical {
+    Evaluate
+    FinalReview
+}
+```
+
+Nodes listed inside `subgraph critical` receive the class `critical`. They match the `.critical` selector in the stylesheet. A node can belong to only one subgraph, but that subgraph name acts as its class for selector matching.
+
+### Resolution rules
+
+The engine resolves stylesheet properties in this order:
+
+1. Parse all rules from the `model_stylesheet` string.
+2. For each node, collect every rule whose selector matches.
+3. Sort matching rules by specificity (ascending), then by declaration order.
+4. The last rule standing for each property wins.
+5. If the node has an explicit attribute (e.g., `llm_model="..."` set directly on the node), that attribute overrides the stylesheet.
+
+Step 5 is the escape hatch. If one node needs a model that does not fit any class, set it directly and the stylesheet will not touch it.
+
+### The full DOT file
+
+```dot
+// ch10-stylesheet.dot
+digraph task_manager {
+    goal = "Build a task management API"
+
+    model_stylesheet = "
+        * {
+            llm_model: claude-haiku-3-5;
+            reasoning_effort: low;
+        }
+        .critical {
+            llm_model: claude-sonnet-4-20250514;
+            reasoning_effort: high;
+        }
+        #Evaluate {
+            llm_model: claude-opus-4-20250514;
+        }
+    "
+
+    Start [shape=Mdiamond label="Start"]
+
+    Plan [
+        shape=box
+        label="Plan"
+        prompt="Create a detailed project plan for: $goal. List the endpoints, data models, and implementation steps."
+        max_retries=3
+    ]
+
+    Implement [
+        shape=box
+        label="Implement"
+        prompt="Implement the plan from the previous step for: $goal. Write the Python code with FastAPI endpoints and Pydantic models."
+        goal_gate=true
+        retry_target="Plan"
+    ]
+
+    Evaluate [
+        shape=box
+        label="Evaluate"
+        prompt="Review the implementation for correctness, completeness, and code quality. Return success if the code meets the plan requirements, or fail with specific feedback."
+        goal_gate=true
+        retry_target="Plan"
+    ]
+
+    RunTests [
+        shape=parallelogram
+        label="Run Tests"
+        tool_command="cd workspace && uv run pytest tests/ -v --tb=short"
+        timeout="60s"
+    ]
+
+    Review [shape=hexagon label="Review"]
+
+    FinalReview [
+        shape=box
+        label="Final Review"
+        prompt="Perform a final quality check on the complete implementation. Verify all endpoints work, models are correct, and tests pass."
+        goal_gate=true
+        retry_target="Implement"
+    ]
+
+    Exit [shape=Msquare label="Exit"]
+
+    subgraph critical {
+        Evaluate
+        FinalReview
+    }
+
+    Start -> Plan
+    Plan -> Implement
+    Implement -> Evaluate
+    Evaluate -> RunTests
+    RunTests -> FinalReview
+    FinalReview -> Review
+
+    Review -> Exit [label="[A] Approve"]
+    Review -> Plan [label="R) Revise"]
+}
+```
+
+This file lives at [`docs/examples/ch10-stylesheet.dot`](examples/ch10-stylesheet.dot) in the repository.
+
+The result: Plan and Implement use `claude-haiku-3-5` (the `*` default). Evaluate uses `claude-opus-4-20250514` (the `#Evaluate` override). FinalReview uses `claude-sonnet-4-20250514` (the `.critical` class). All critical nodes reason at high effort; everything else reasons at low effort.
+
+### Run the stylesheet pipeline
+
+Validate:
+
+```bash
+uv run attractor validate task-manager-v9.dot
+```
+
+```
+Pipeline 'task_manager' is valid (8 nodes, 9 edges)
+```
+
+Run in dry-run mode:
+
+```bash
+uv run attractor run --dry-run task-manager-v9.dot
+```
+
+```
+Pipeline 'task_manager' completed: success
+Notes: [dry-run] RunTests
+```
+
+The engine applies the stylesheet before execution. Each node receives its resolved model, provider, and reasoning effort. You can verify the resolution by running with `--verbose` -- the log shows which model each node uses.
+
+---
+
+## Chapter 11: Context and Fidelity
+
+Every pipeline carries a context store -- a bag of key-value pairs that flows from node to node. Nodes read context through prompt templates and write context through outcome updates. Fidelity controls how much of that context the engine passes forward.
+
+### The context store
+
+Context is a thread-safe key-value store. The engine creates it at pipeline start and threads it through every node. Each node can read existing values and write new ones.
+
+Nodes read context through variable references in prompts. When a prompt contains `$goal`, the engine substitutes the value of the `goal` key from context. Nodes write context through `context_updates` in their outcome -- a dictionary of keys and values the engine merges into the store after the node completes.
+
+### Auto-set variables
+
+The engine sets several context variables automatically:
+
+| Variable | Value | Set when |
+|----------|-------|----------|
+| `pipeline.name` | The graph's `name` attribute | Pipeline start |
+| `pipeline.goal` | The graph's `goal` attribute | Pipeline start |
+| `goal` | Same as `pipeline.goal` | Pipeline start |
+| `outcome` | The previous node's outcome label | After each node |
+| `preferred_label` | The label the LLM chose for its response | After each node |
+
+You never need to set these manually. They are always available in prompts.
+
+### Custom context variables
+
+Nodes can set arbitrary keys. When a node's outcome includes `context_updates`, those key-value pairs merge into the store:
+
+```
+context_updates = {
+    "api_endpoints": ["GET /tasks", "POST /tasks", "DELETE /tasks/{id}"],
+    "test_count": 12,
+    "coverage": "87%"
+}
+```
+
+Subsequent nodes can reference these values. The context accumulates as the pipeline progresses -- each node sees everything prior nodes have written.
+
+### Fidelity modes
+
+Context grows as the pipeline runs. A 15-node pipeline with detailed outputs at each step produces a large context. Passing all of it to every node wastes tokens and can confuse the model. Fidelity modes control how much context the engine includes in each node's preamble.
+
+Six modes are available:
+
+| Mode | What the node sees |
+|------|-------------------|
+| `full` | Everything: pipeline name, goal, all completed nodes with outcomes, all context variables. Expensive. Use for nodes that need the complete picture. |
+| `truncate` | Pipeline name and goal only. The cheapest option. Use for nodes that need no prior context. |
+| `compact` | Pipeline name, goal, all completed nodes with outcomes, and the first 20 context variables. The default. |
+| `summary:low` | Pipeline name, goal, and "Completed N stages." No details. |
+| `summary:medium` | Pipeline name, goal, and the last 5 completed nodes with outcomes. |
+| `summary:high` | Pipeline name, goal, the last 10 completed nodes with outcomes, and the first 30 context variables. |
+
+### Setting fidelity
+
+Set fidelity at three levels. The engine resolves them in precedence order:
+
+1. **Edge fidelity** -- set on a specific edge. Highest priority.
+2. **Node fidelity** -- set on the target node.
+3. **Graph default_fidelity** -- set on the graph.
+4. **Built-in default** -- `compact`.
+
+Edge fidelity:
+
+```dot
+Plan -> Implement [fidelity="full"]
+```
+
+Node fidelity:
+
+```dot
+Implement [shape=box fidelity="summary:medium" ...]
+```
+
+Graph default:
+
+```dot
+digraph task_manager {
+    default_fidelity = "compact"
+    ...
+}
+```
+
+If none of these are set, the engine uses `compact`.
+
+### When to use each mode
+
+- **`full`** -- Final review nodes, merge nodes that synthesize output from multiple branches.
+- **`truncate`** -- Start nodes, nodes that generate fresh content with no dependency on prior steps.
+- **`compact`** -- Most nodes. The default strikes a good balance between context and cost.
+- **`summary:low`** -- Nodes deep in a long pipeline where only the goal matters.
+- **`summary:medium`** -- Mid-pipeline nodes that need recent history but not the full trail.
+- **`summary:high`** -- Evaluation nodes that need substantial context but not everything.
+
+### Thread IDs
+
+When fidelity is `full`, the engine can reuse the same LLM conversation thread across nodes. Set `thread_id` on a node or edge to group related nodes into one thread:
+
+```dot
+Plan [shape=box thread_id="planning" ...]
+Implement [shape=box thread_id="planning" ...]
+```
+
+Both nodes share the `planning` thread. The LLM sees Plan's full conversation history when it executes Implement. This avoids re-sending context and preserves conversational continuity.
+
+Nodes in the same subgraph share a thread ID by default (derived from the subgraph name). You can override this with an explicit `thread_id` attribute.
+
+Thread IDs only matter when fidelity is `full`. Other fidelity modes build a fresh preamble for each node.
+
+---
+
+## Chapter 12: Checkpoints and Recovery
+
+Long-running pipelines fail. The LLM returns an error, the network drops, or the host machine restarts. Without checkpoints, you start over from the beginning. Checkpoints save the pipeline's state after each node so you can resume from where it stopped.
+
+### Enable checkpoints
+
+Checkpoints are enabled by default when you use a log directory. Pass `--log-dir` to save logs and checkpoints:
+
+```bash
+uv run attractor run task-manager-v9.dot --log-dir ./logs
+```
+
+The engine saves a checkpoint after each node completes. The checkpoint file lives at `{logs_root}/checkpoint.json`.
+
+### What gets saved
+
+The checkpoint captures five pieces of state:
+
+| Field | Contents |
+|-------|----------|
+| `current_node` | The node that just completed |
+| `completed_nodes` | Ordered list of all completed node IDs |
+| `node_retries` | Retry counts per node |
+| `context` | All context key-value pairs at the time of the checkpoint |
+| `logs` | The full log trail up to this point |
+
+### What does not get saved
+
+- **In-flight LLM calls** -- if the engine crashes mid-call, that call is lost. The engine re-executes the next node on resume.
+- **Handler internal state** -- custom handlers that maintain their own state must re-initialize on resume.
+
+### Examine a checkpoint
+
+After running a pipeline, inspect the checkpoint file:
+
+```bash
+cat logs/checkpoint.json | python -m json.tool
+```
+
+```json
+{
+  "timestamp": 1706300000.123,
+  "current_node": "Evaluate",
+  "completed_nodes": ["Start", "Plan", "Implement", "Evaluate"],
+  "node_retries": {
+    "Plan": 0,
+    "Implement": 1,
+    "Evaluate": 0
+  },
+  "context": {
+    "pipeline.name": "task_manager",
+    "pipeline.goal": "Build a task management API",
+    "goal": "Build a task management API",
+    "outcome": "success",
+    "api_endpoints": ["GET /tasks", "POST /tasks", "DELETE /tasks/{id}"]
+  },
+  "logs": [
+    "Start: passed",
+    "Plan: success",
+    "Implement: success (retry 1)",
+    "Evaluate: success"
+  ]
+}
+```
+
+The `current_node` field tells you the last node that completed. The `completed_nodes` list shows the full execution path. The `context` object holds every key-value pair the pipeline accumulated.
+
+### Resume from a checkpoint
+
+If the pipeline crashes or you stop it, resume with:
+
+```bash
+uv run attractor resume logs/checkpoint.json task-manager-v9.dot --log-dir ./logs
+```
+
+The engine loads the checkpoint, restores context and completed node history, and picks up from the node after `current_node`. If the checkpoint shows `current_node: "Evaluate"`, the engine resumes at the next node in the graph (RunTests, in the Chapter 10 pipeline).
+
+The resumed run appends to the existing logs. The checkpoint file is overwritten after each subsequent node.
+
+### When to use checkpoints
+
+Use checkpoints for:
+
+- **Long-running pipelines** -- pipelines with 10+ nodes or slow LLM calls. A crash at node 12 of 15 is painful without recovery.
+- **Expensive pipelines** -- pipelines that use strong models (Opus, GPT-4) where re-running from scratch wastes money.
+- **Production pipelines** -- any pipeline that runs unattended. Crashes are inevitable; recovery should be automatic.
+
+Skip checkpoints for:
+
+- **Quick iterations during development** -- dry-run mode is faster and does not need recovery.
+- **Pipelines under 5 nodes** -- re-running from scratch takes seconds.
