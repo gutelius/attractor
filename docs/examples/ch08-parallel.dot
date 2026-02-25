@@ -1,0 +1,67 @@
+// ch08-parallel.dot
+// Splits implementation into three parallel branches: API, Frontend, Tests.
+// The component shape triggers the ParallelHandler (fan-out).
+// The tripleoctagon shape triggers the FanInHandler (fan-in).
+
+digraph task_manager {
+    goal = "Build a task management API"
+
+    Start [shape=Mdiamond label="Start"]
+
+    Plan [
+        shape=box
+        label="Plan"
+        prompt="Create a detailed project plan for: $goal. Define the API endpoints, frontend components, and test cases."
+        max_retries=3
+    ]
+
+    Parallel [
+        shape=component
+        label="Parallel"
+        join_policy="wait_all"
+        error_policy="continue"
+    ]
+
+    API [
+        shape=box
+        label="API"
+        prompt="Implement the FastAPI endpoints and data models from the plan."
+    ]
+
+    Frontend [
+        shape=box
+        label="Frontend"
+        prompt="Implement the frontend components from the plan."
+    ]
+
+    Tests [
+        shape=box
+        label="Tests"
+        prompt="Write pytest test cases covering the API endpoints from the plan."
+    ]
+
+    Merge [
+        shape=tripleoctagon
+        label="Merge"
+    ]
+
+    Review [shape=hexagon label="Review"]
+
+    Exit [shape=Msquare label="Exit"]
+
+    Start -> Plan
+    Plan -> Parallel
+
+    Parallel -> API
+    Parallel -> Frontend
+    Parallel -> Tests
+
+    API -> Merge
+    Frontend -> Merge
+    Tests -> Merge
+
+    Merge -> Review
+
+    Review -> Exit [label="[A] Approve"]
+    Review -> Plan [label="R) Revise"]
+}
