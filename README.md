@@ -35,6 +35,8 @@ uv run attractor validate my-pipeline.dot
 uv run attractor run my-pipeline.dot --dry-run
 ```
 
+See the [Tutorial](./docs/tutorial.md) for the full walkthrough.
+
 ## Packages
 
 | Package | Purpose |
@@ -45,10 +47,18 @@ uv run attractor run my-pipeline.dot --dry-run
 
 ## Documentation
 
-- **[User Guide](./docs/user-guide.md)** — installation, CLI reference, pipeline authoring, programmatic API, HTTP server
-- **[Attractor Spec](./attractor-spec.md)** — NLSpec for the pipeline engine
-- **[Coding Agent Loop Spec](./coding-agent-loop-spec.md)** — NLSpec for the agent loop
-- **[Unified LLM Client Spec](./unified-llm-spec.md)** — NLSpec for the LLM client
+- **[Tutorial](./docs/tutorial.md)** — learn by building a complete product from idea to shipped code
+- **[Cookbook](./docs/cookbook.md)** — copy-paste pipeline patterns for common scenarios
+- **[Concepts](./docs/concepts.md)** — understand how Attractor thinks
+- **[Reference](./docs/reference.md)** — look up every attribute, operator, and event
+
+## Specifications
+
+NLSpecs for implementors building their own Attractor:
+
+- **[Attractor Spec](./attractor-spec.md)** — pipeline engine NLSpec
+- **[Coding Agent Loop Spec](./coding-agent-loop-spec.md)** — agent loop NLSpec
+- **[Unified LLM Client Spec](./unified-llm-spec.md)** — LLM client NLSpec
 
 ## Building Your Own Attractor
 
